@@ -1,0 +1,603 @@
+# ============================================================
+# SINGLE-SAMPLE GENE SET ENRICHMENT ANALYSIS (ssGSEA)
+# USING MSigDB GENE SETS
+# ============================================================
+#
+# DATA STRUCTURE
+# ------------------------------------------------------------
+#
+# Input CSV:
+#
+#   - First column  = gene/feature identifiers
+#   - Remaining columns = samples
+#   - Rows = gene names
+#   - Columns = samples
+#
+# Example:
+#
+#              Sample_1  Sample_2  Sample_3
+# Feature_1       2.4       3.1       2.8
+# Feature_2       5.2       4.8       5.5
+# Feature_3       1.3       1.7       1.5
+#
+# The first column is used as the feature identifier.
+#
+# ============================================================
+
+
+# ============================================================
+# 1. REQUIRED PACKAGES
+# ============================================================
+
+library(GSVA)
+library(msigdbr)
+library(readr)
+library(dplyr)
+library(tibble)
+
+
+# ============================================================
+# 2. USER INPUTS
+# ============================================================
+
+# Select the input abundance/expression matrix.
+input_file <- file.choose()
+
+# Select the MSigDB collection:
+#
+#   "H"  = Hallmark
+#   "C2" = Curated gene sets
+#
+collection <- toupper(
+  readline("Enter MSigDB collection (H or C2): ")
+)
+
+while (!collection %in% c("H", "C2")) {
+  collection <- toupper(
+    readline("Please enter H or C2: ")
+  )
+}
+
+# Minimum number of input features required to overlap
+# with a pathway/gene set.
+threshold_input <- readline(
+  "Minimum number of input features per pathway [default = 5]: "
+)
+
+if (threshold_input == "") {
+  threshold <- 5
+} else {
+  threshold <- as.integer(threshold_input)
+}
+
+if (is.na(threshold) || threshold < 1) {
+  stop("The pathway threshold must be an integer >= 1.")
+}
+
+
+# ============================================================
+# 3. READ INPUT DATA
+# ============================================================
+
+data <- read_csv(
+  input_file,
+  show_col_types = FALSE
+)
+
+if (ncol(data) < 2) {
+  stop(
+    "The input CSV must contain one identifier column and at least one sample column."
+  )
+}
+
+
+# ============================================================
+# 4. PREPARE FEATURE IDENTIFIERS
+# ============================================================
+
+feature_column <- colnames(data)[1]
+
+feature_names <- trimws(
+  as.character(data[[feature_column]])
+)
+
+# Remove missing or empty identifiers.
+valid_features <- (
+  !is.na(feature_names) &
+  feature_names != ""
+)
+
+data <- data[valid_features, , drop = FALSE]
+
+feature_names <- feature_names[valid_features]
+
+
+# ============================================================
+# 5. CREATE NUMERICAL ABUNDANCE MATRIX
+# ============================================================
+
+abundance_data <- data[, -1, drop = FALSE]
+
+abundance_matrix <- as.matrix(
+  data.frame(
+    lapply(
+      abundance_data,
+      function(x) as.numeric(as.character(x))
+    ),
+    check.names = FALSE
+  )
+)
+
+rownames(abundance_matrix) <- feature_names
+
+
+# ============================================================
+# 6. HANDLE DUPLICATE IDENTIFIERS
+# ============================================================
+#
+# When multiple rows have the same identifier, their values
+# are averaged before pathway analysis.
+#
+# ============================================================
+
+if (anyDuplicated(rownames(abundance_matrix)) > 0) {
+
+  message(
+    "Duplicate feature identifiers detected. ",
+    "Combining duplicate entries using mean abundance."
+  )
+
+  abundance_df <- as.data.frame(
+    abundance_matrix,
+    check.names = FALSE
+  )
+
+  abundance_df$Feature <- rownames(abundance_df)
+
+  abundance_df <- abundance_df %>%
+    group_by(Feature) %>%
+    summarise(
+      across(
+        everything(),
+        ~ mean(.x, na.rm = TRUE)
+      ),
+      .groups = "drop"
+    )
+
+  abundance_matrix <- as.matrix(
+    abundance_df[, -1, drop = FALSE]
+  )
+
+  rownames(abundance_matrix) <- abundance_df$Feature
+}
+
+
+# ============================================================
+# 7. REMOVE FEATURES WITH NO VALID VALUES
+# ============================================================
+
+all_missing <- apply(
+  abundance_matrix,
+  1,
+  function(x) all(is.na(x))
+)
+
+if (any(all_missing)) {
+
+  message(
+    "Removing ",
+    sum(all_missing),
+    " features with all values missing."
+  )
+
+  abundance_matrix <- abundance_matrix[
+    !all_missing,
+    ,
+    drop = FALSE
+  ]
+}
+
+
+# ============================================================
+# 8. PREPARE MSigDB GENE SETS
+# ============================================================
+
+message("Loading MSigDB gene sets...")
+
+if (collection == "H") {
+
+  msig <- msigdbr(
+    db_species = "HS",
+    species = "Homo sapiens",
+    collection = "H"
+  )
+
+} else {
+
+  msig <- msigdbr(
+    db_species = "HS",
+    species = "Homo sapiens",
+    collection = "C2"
+  )
+}
+
+
+# ============================================================
+# 9. STANDARDIZE IDENTIFIERS
+# ============================================================
+
+# Gene symbols are matched using uppercase identifiers.
+msig <- msig %>%
+  mutate(
+    gene_symbol = toupper(
+      trimws(gene_symbol)
+    )
+  )
+
+rownames(abundance_matrix) <- toupper(
+  trimws(rownames(abundance_matrix))
+)
+
+
+# ============================================================
+# 10. REMOVE DUPLICATE GENE-SET MEMBERS
+# ============================================================
+
+msig <- msig %>%
+  distinct(
+    gs_name,
+    gene_symbol,
+    .keep_all = TRUE
+)
+
+
+# ============================================================
+# 11. DETERMINE INPUT–MSigDB OVERLAP
+# ============================================================
+
+input_features <- rownames(abundance_matrix)
+
+mapped_features <- intersect(
+  input_features,
+  unique(msig$gene_symbol)
+)
+
+message(
+  "Input features: ",
+  length(input_features)
+)
+
+message(
+  "Features mapped to MSigDB: ",
+  length(mapped_features)
+)
+
+message(
+  "Features not mapped to MSigDB: ",
+  length(input_features) -
+    length(mapped_features)
+)
+
+if (length(mapped_features) < 2) {
+  stop(
+    "Too few input features could be mapped to MSigDB."
+  )
+}
+
+
+# ============================================================
+# 12. FILTER GENE SETS BY INPUT OVERLAP
+# ============================================================
+
+pathway_mapping <- msig %>%
+  filter(
+    gene_symbol %in% input_features
+  ) %>%
+  group_by(gs_name) %>%
+  summarise(
+    Features = paste(
+      unique(gene_symbol),
+      collapse = ", "
+    ),
+    Feature_Count = n_distinct(gene_symbol),
+    .groups = "drop"
+  )
+
+pathway_mapping_filtered <- pathway_mapping %>%
+  filter(
+    Feature_Count >= threshold
+  )
+
+message(
+  "Gene sets before filtering: ",
+  nrow(pathway_mapping)
+)
+
+message(
+  "Gene sets after filtering: ",
+  nrow(pathway_mapping_filtered)
+)
+
+if (nrow(pathway_mapping_filtered) == 0) {
+  stop(
+    paste0(
+      "No gene sets contain at least ",
+      threshold,
+      " mapped input features."
+    )
+  )
+}
+
+
+# ============================================================
+# 13. CREATE GENE-SET LIST
+# ============================================================
+
+gene_sets <- msig %>%
+  filter(
+    gs_name %in% pathway_mapping_filtered$gs_name
+  ) %>%
+  group_by(gs_name) %>%
+  summarise(
+    genes = list(
+      unique(gene_symbol)
+    ),
+    .groups = "drop"
+  )
+
+gene_set_list <- setNames(
+  gene_sets$genes,
+  gene_sets$gs_name
+)
+
+
+# ============================================================
+# 14. HANDLE MISSING VALUES
+# ============================================================
+#
+# ssGSEA requires a complete numerical matrix.
+#
+# The code below uses the minimum observed value within each
+# sample to replace missing values.
+# ============================================================
+
+abundance_matrix[
+  !is.finite(abundance_matrix)
+] <- NA
+
+for (j in seq_len(ncol(abundance_matrix))) {
+
+  sample_values <- abundance_matrix[, j]
+
+  if (any(is.na(sample_values))) {
+
+    min_value <- min(
+      sample_values,
+      na.rm = TRUE
+    )
+
+    if (!is.finite(min_value)) {
+      stop(
+        paste0(
+          "Sample ",
+          colnames(abundance_matrix)[j],
+          " contains no valid abundance values."
+        )
+      )
+    }
+
+    abundance_matrix[
+      is.na(abundance_matrix[, j]),
+      j
+    ] <- min_value
+  }
+}
+
+
+# ============================================================
+# 15. RUN ssGSEA
+# ============================================================
+
+message("Running ssGSEA...")
+
+ssgsea_parameters <- ssgseaParam(
+  exprData = abundance_matrix,
+  geneSets = gene_set_list,
+  minSize = threshold,
+  maxSize = Inf,
+  alpha = 0.25,
+  normalize = TRUE
+)
+
+ssgsea_result <- gsva(
+  ssgsea_parameters
+)
+
+
+# ============================================================
+# 16. EXTRACT ENRICHMENT SCORES
+# ============================================================
+
+enrichment_matrix <- as.matrix(
+  ssgsea_result
+)
+
+enrichment_output <- as.data.frame(
+  enrichment_matrix,
+  check.names = FALSE
+)
+
+enrichment_output <- rownames_to_column(
+  enrichment_output,
+  var = "Pathway"
+)
+
+
+# ============================================================
+# 17. CREATE OUTPUT DIRECTORY
+# ============================================================
+
+output_directory <- file.path(
+  dirname(input_file),
+  paste0(
+    "ssGSEA_",
+    collection,
+    "_threshold_",
+    threshold
+  )
+)
+
+if (!dir.exists(output_directory)) {
+  dir.create(output_directory)
+}
+
+
+# ============================================================
+# 18. SAVE ENRICHMENT SCORES
+# ============================================================
+
+write_csv(
+  enrichment_output,
+  file.path(
+    output_directory,
+    "ssGSEA_enrichment_scores.csv"
+  )
+)
+
+
+# ============================================================
+# 19. SAVE PATHWAY–FEATURE MAPPING
+# ============================================================
+
+pathway_features <- pathway_mapping_filtered %>%
+  select(
+    Pathway = gs_name,
+    Features
+  )
+
+write_csv(
+  pathway_features,
+  file.path(
+    output_directory,
+    "pathway_features.csv"
+  )
+)
+
+
+# ============================================================
+# 20. SAVE PATHWAY SUMMARY
+# ============================================================
+
+pathway_summary <- pathway_mapping_filtered %>%
+  select(
+    Pathway = gs_name,
+    Feature_Count,
+    Features
+  ) %>%
+  arrange(
+    desc(Feature_Count)
+  )
+
+write_csv(
+  pathway_summary,
+  file.path(
+    output_directory,
+    "pathway_summary.csv"
+  )
+)
+
+
+# ============================================================
+# 21. SAVE UNMAPPED FEATURES
+# ============================================================
+
+unmapped_features <- setdiff(
+  input_features,
+  unique(msig$gene_symbol)
+)
+
+unmapped_table <- data.frame(
+  Unmapped_Feature = unmapped_features
+)
+
+write_csv(
+  unmapped_table,
+  file.path(
+    output_directory,
+    "unmapped_features.csv"
+  )
+)
+
+
+# ============================================================
+# 22. SAVE ANALYSIS INFORMATION
+# ============================================================
+
+msigdb_version <- unique(
+  msig$db_version
+)
+
+writeLines(
+  c(
+    paste0(
+      "MSigDB version: ",
+      paste(msigdb_version, collapse = ", ")
+    ),
+    paste0(
+      "Collection: ",
+      collection
+    ),
+    paste0(
+      "Minimum input features per pathway: ",
+      threshold
+    ),
+    paste0(
+      "Input features: ",
+      length(input_features)
+    ),
+    paste0(
+      "Mapped features: ",
+      length(mapped_features)
+    ),
+    paste0(
+      "Retained pathways: ",
+      nrow(pathway_mapping_filtered)
+    )
+  ),
+  file.path(
+    output_directory,
+    "analysis_information.txt"
+  )
+)
+
+
+# ============================================================
+# 23. COMPLETION MESSAGE
+# ============================================================
+
+message("")
+message("============================================")
+message("             ANALYSIS COMPLETE")
+message("============================================")
+message("")
+message(
+  "Output directory: ",
+  output_directory
+)
+message("")
+message(
+  "ssGSEA enrichment scores: ",
+  nrow(enrichment_output),
+  " pathways × ",
+  ncol(enrichment_output) - 1,
+  " samples"
+)
+message(
+  "Mapped input features: ",
+  length(mapped_features)
+)
+message(
+  "Retained pathways: ",
+  nrow(pathway_mapping_filtered)
+)
+message("")

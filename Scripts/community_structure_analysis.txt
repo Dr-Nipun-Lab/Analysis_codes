@@ -1,0 +1,731 @@
+# ============================================================
+# Community structure analysis of a correlation network
+#
+# Input:
+# - Significant correlation edge table
+# - Feature_1 = features from Dataset 1
+# - Feature_2 = features from Dataset 2
+# - correlation = correlation coefficient
+#
+# Community detection:
+# - Fast-greedy algorithm
+# - Edge weights = absolute correlation strength
+#
+# Bridge nodes:
+# - Top 10% of Dataset 2 nodes by betweenness
+# ============================================================
+
+library(igraph)
+library(dplyr)
+library(tibble)
+library(ggraph)
+library(tidygraph)
+library(ggplot2)
+library(ggforce)
+library(RColorBrewer)
+
+# ------------------------------------------------------------
+# Input
+# ------------------------------------------------------------
+
+correlation_edges <- read.csv(
+  "significant_correlation_edges.csv",
+  check.names = FALSE
+)
+
+# Expected columns:
+# Feature_1
+# Feature_2
+# correlation
+# edge_color
+# edge_width
+
+# ------------------------------------------------------------
+# Create network
+# ------------------------------------------------------------
+
+net <- graph_from_data_frame(
+  correlation_edges[, c(
+    "Feature_1",
+    "Feature_2",
+    "correlation",
+    "edge_color",
+    "edge_width"
+  )],
+  directed = FALSE
+)
+
+# Ensure the graph is undirected
+net <- as.undirected(net)
+
+# ------------------------------------------------------------
+# Define node types
+# ------------------------------------------------------------
+
+V(net)$type <- ifelse(
+  V(net)$name %in% correlation_edges$Feature_1,
+  "Dataset_1",
+  "Dataset_2"
+)
+
+# ------------------------------------------------------------
+# Community detection
+# ------------------------------------------------------------
+
+community_model <- cluster_fast_greedy(
+  net,
+  weights = E(net)$edge_width
+)
+
+V(net)$community <- membership(community_model)
+V(net)$community <- as.factor(V(net)$community)
+
+n_comm <- length(
+  unique(V(net)$community)
+)
+
+cat(
+  "Number of communities:",
+  n_comm,
+  "\n"
+)
+
+# ------------------------------------------------------------
+# Bridge-node analysis
+# ------------------------------------------------------------
+
+V(net)$betweenness <- betweenness(
+  net,
+  normalized = TRUE
+)
+
+# Top 10% of Dataset 2 nodes
+dataset2_betweenness <- V(net)$betweenness[
+  V(net)$type == "Dataset_2"
+]
+
+bridge_threshold <- quantile(
+  dataset2_betweenness,
+  0.90,
+  na.rm = TRUE
+)
+
+V(net)$bridge <- ifelse(
+  V(net)$type == "Dataset_2" &
+    V(net)$betweenness >= bridge_threshold,
+  "Bridge",
+  "Non-bridge"
+)
+
+# ------------------------------------------------------------
+# Bridge-node table
+# ------------------------------------------------------------
+
+bridge_nodes <- data.frame(
+  node = V(net)$name,
+  betweenness = V(net)$betweenness,
+  type = V(net)$type,
+  community = V(net)$community,
+  bridge = V(net)$bridge
+) %>%
+  filter(type == "Dataset_2") %>%
+  arrange(desc(betweenness))
+
+print(
+  head(bridge_nodes, 10)
+)
+
+write.csv(
+  bridge_nodes,
+  "bridge_nodes.csv",
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Community membership table
+# ------------------------------------------------------------
+
+community_membership <- data.frame(
+  node = V(net)$name,
+  type = V(net)$type,
+  community = V(net)$community,
+  betweenness = V(net)$betweenness,
+  bridge = V(net)$bridge
+)
+
+write.csv(
+  community_membership,
+  "community_membership.csv",
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Community composition
+# ------------------------------------------------------------
+
+community_composition <- community_membership %>%
+  count(community, type) %>%
+  arrange(community, desc(n))
+
+print(community_composition)
+
+write.csv(
+  community_composition,
+  "community_composition.csv",
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Dataset 1 features by community
+# ------------------------------------------------------------
+
+dataset1_community_features <- community_membership %>%
+  filter(type == "Dataset_1") %>%
+  count(community, node, name = "n") %>%
+  arrange(community, desc(n))
+
+print(dataset1_community_features)
+
+write.csv(
+  dataset1_community_features,
+  "dataset1_features_by_community.csv",
+  row.names = FALSE
+)
+
+# ============================================================
+# Community visualization
+# ============================================================
+
+# ------------------------------------------------------------
+# Node colours
+# ------------------------------------------------------------
+
+n_colors <- max(
+  3,
+  n_comm
+)
+
+comm_palette <- colorRampPalette(
+  brewer.pal(8, "Set2")
+)(n_colors)
+
+V(net)$community_color <- comm_palette[
+  as.numeric(V(net)$community)
+]
+
+dataset1_color <- adjustcolor(
+  "#7EA8F8",
+  alpha.f = 0.9
+)
+
+V(net)$final_color <- ifelse(
+  V(net)$type == "Dataset_1",
+  dataset1_color,
+  V(net)$community_color
+)
+
+# ------------------------------------------------------------
+# Node properties
+# ------------------------------------------------------------
+
+V(net)$size <- ifelse(
+  V(net)$type == "Dataset_1",
+  20,
+  10
+)
+
+V(net)$label.color <- "black"
+
+V(net)$label.cex <- ifelse(
+  V(net)$type == "Dataset_1",
+  0.9,
+  0.7
+)
+
+V(net)$frame.color <- NA
+
+# ------------------------------------------------------------
+# Force-directed layout
+# ------------------------------------------------------------
+
+set.seed(123)
+
+network_layout <- layout_with_fr(
+  net,
+  weights = E(net)$edge_width
+)
+
+# ------------------------------------------------------------
+# Base community network
+# ------------------------------------------------------------
+
+par(
+  bg = "#f7f7fb",
+  mar = c(1, 1, 1, 1)
+)
+
+plot(
+  net,
+  layout = network_layout,
+  edge.color = E(net)$edge_color,
+  edge.width = E(net)$edge_width,
+  vertex.color = V(net)$final_color,
+  vertex.size = V(net)$size,
+  vertex.label = V(net)$name,
+  vertex.label.cex = V(net)$label.cex,
+  vertex.label.color = "black",
+  vertex.frame.color = NA,
+  main = "Community Structure of Correlation Network"
+)
+
+# ------------------------------------------------------------
+# Community hulls
+# ------------------------------------------------------------
+
+for (comm in levels(V(net)$community)) {
+  
+  idx <- which(
+    V(net)$community == comm
+  )
+  
+  if (length(idx) < 3) {
+    next
+  }
+  
+  coords <- network_layout[idx, ]
+  
+  hull <- chull(coords)
+  
+  polygon(
+    coords[hull, ],
+    border = NA,
+    col = adjustcolor(
+      comm_palette[
+        as.numeric(comm)
+      ],
+      alpha.f = 0.15
+    )
+  )
+}
+
+# ============================================================
+# Tidygraph representation
+# ============================================================
+
+g_tbl <- as_tbl_graph(net) %>%
+  activate(nodes) %>%
+  mutate(
+    community = as.factor(community),
+    is_bridge = bridge == "Bridge"
+  )
+
+# ============================================================
+# Selected-community visualization
+# ============================================================
+
+# Select communities to display.
+# Community numbers are assigned by the community-detection
+# algorithm and do not represent an intrinsic ordering.
+
+keep_communities <- c(
+  "1", "2", "3", "4"
+)
+
+g_selected <- g_tbl %>%
+  activate(nodes) %>%
+  filter(
+    community %in% keep_communities
+  ) %>%
+  activate(edges) %>%
+  filter(
+    .N()$community[from] %in% keep_communities &
+      .N()$community[to] %in% keep_communities
+  )
+
+# ------------------------------------------------------------
+# Layout-only edge weighting
+# ------------------------------------------------------------
+
+g_selected <- g_selected %>%
+  activate(edges) %>%
+  mutate(
+    layout_weight = ifelse(
+      .N()$community[from] ==
+        .N()$community[to],
+      width,
+      width * 0.15
+    )
+  )
+
+# ------------------------------------------------------------
+# Calculate layout
+# ------------------------------------------------------------
+
+set.seed(123)
+
+selected_layout <- layout_with_fr(
+  g_selected,
+  weights = E(g_selected)$layout_weight
+)
+
+# ------------------------------------------------------------
+# Separate selected communities spatially
+# ------------------------------------------------------------
+
+g_selected <- g_selected %>%
+  activate(nodes) %>%
+  mutate(
+    x = selected_layout[, 1] +
+      case_when(
+        community == "2" ~ -6,
+        community == "1" ~  6,
+        TRUE ~ 0
+      ),
+    
+    y = selected_layout[, 2] +
+      case_when(
+        community == "3" ~  6,
+        community == "4" ~ -6,
+        TRUE ~ 0
+      )
+  )
+
+# ------------------------------------------------------------
+# Plot selected communities
+# ------------------------------------------------------------
+
+ggraph(
+  g_selected,
+  layout = "manual",
+  x = x,
+  y = y
+) +
+  
+  geom_mark_hull(
+    aes(
+      x = x,
+      y = y,
+      fill = community
+    ),
+    concavity = 4,
+    alpha = 0.2,
+    colour = NA
+  ) +
+  
+  geom_edge_link(
+    aes(
+      width = width,
+      color = ifelse(
+        correlation > 0,
+        "Positive",
+        "Negative"
+      )
+    ),
+    alpha = 0.4
+  ) +
+  
+  geom_node_point(
+    aes(
+      size = size,
+      fill = community,
+      shape = is_bridge
+    ),
+    colour = "white",
+    stroke = 1.2
+  ) +
+  
+  geom_node_text(
+    aes(label = name),
+    repel = TRUE,
+    size = 3,
+    fontface = "bold"
+  ) +
+  
+  scale_edge_color_manual(
+    name = "Association",
+    values = c(
+      "Positive" = "red",
+      "Negative" = "blue"
+    )
+  ) +
+  
+  scale_fill_brewer(
+    palette = "Set1",
+    name = "Community"
+  ) +
+  
+  scale_shape_manual(
+    name = "Bridge node",
+    values = c(
+      `FALSE` = 21,
+      `TRUE` = 24
+    )
+  ) +
+  
+  scale_size_continuous(
+    range = c(7, 14),
+    guide = "none"
+  ) +
+  
+  theme_void() +
+  
+  ggtitle(
+    "Selected Communities with Inter-community Connectivity"
+  )
+
+# ============================================================
+# Full community network
+# ============================================================
+
+g_all <- g_tbl %>%
+  activate(nodes) %>%
+  filter(!is.na(community))
+
+# ------------------------------------------------------------
+# Layout-only edge weighting and visual transparency
+# ------------------------------------------------------------
+
+g_all <- g_all %>%
+  activate(edges) %>%
+  mutate(
+    same_community =
+      .N()$community[from] ==
+      .N()$community[to],
+    
+    layout_weight = ifelse(
+      same_community,
+      width,
+      width * 0.15
+    ),
+    
+    edge_alpha = ifelse(
+      same_community,
+      0.45,
+      0.07
+    )
+  )
+
+# ------------------------------------------------------------
+# Calculate layout
+# ------------------------------------------------------------
+
+set.seed(123)
+
+all_layout <- layout_with_fr(
+  g_all,
+  weights = E(g_all)$layout_weight
+)
+
+# ------------------------------------------------------------
+# Position communities around a circle
+# ------------------------------------------------------------
+
+communities <- sort(
+  unique(
+    g_all %>%
+      activate(nodes) %>%
+      pull(community)
+  )
+)
+
+n_comm <- length(communities)
+
+radius <- 5
+
+theta <- seq(
+  0,
+  2 * pi,
+  length.out = n_comm + 1
+)[-(n_comm + 1)]
+
+community_positions <- tibble(
+  community = communities,
+  dx = radius * cos(theta),
+  dy = radius * sin(theta)
+)
+
+# ------------------------------------------------------------
+# Apply community offsets
+# ------------------------------------------------------------
+
+g_all <- g_all %>%
+  activate(nodes) %>%
+  left_join(
+    community_positions,
+    by = "community"
+  ) %>%
+  mutate(
+    x = all_layout[, 1] + dx,
+    y = all_layout[, 2] + dy
+  )
+
+# ------------------------------------------------------------
+# Plot full community network
+# ------------------------------------------------------------
+
+ggraph(
+  g_all,
+  layout = "manual",
+  x = x,
+  y = y
+) +
+  
+  geom_mark_hull(
+    aes(
+      x = x,
+      y = y,
+      fill = community
+    ),
+    concavity = 4,
+    alpha = 0.2,
+    colour = NA
+  ) +
+  
+  geom_edge_link(
+    aes(
+      width = width,
+      color = ifelse(
+        correlation > 0,
+        "Positive",
+        "Negative"
+      ),
+      alpha = edge_alpha
+    )
+  ) +
+  
+  geom_node_point(
+    aes(
+      size = size,
+      fill = community,
+      shape = is_bridge
+    ),
+    colour = "white",
+    stroke = 1.2
+  ) +
+  
+  geom_node_text(
+    aes(label = name),
+    repel = TRUE,
+    size = 3,
+    fontface = "bold"
+  ) +
+  
+  scale_edge_color_manual(
+    name = "Association",
+    values = c(
+      "Positive" = "red",
+      "Negative" = "blue"
+    )
+  ) +
+  
+  scale_edge_width_continuous(
+    name = "Strength of association"
+  ) +
+  
+  scale_edge_alpha(
+    range = c(0.07, 0.45),
+    guide = "none"
+  ) +
+  
+  scale_fill_brewer(
+    palette = "Set1",
+    name = "Community"
+  ) +
+  
+  scale_shape_manual(
+    name = "Bridge node",
+    values = c(
+      `FALSE` = 21,
+      `TRUE` = 24
+    )
+  ) +
+  
+  scale_size_continuous(
+    range = c(5, 10),
+    guide = "none"
+  ) +
+  
+  guides(
+    shape = guide_legend(
+      override.aes = list(
+        fill = "grey70",
+        colour = "black",
+        size = 5,
+        stroke = 1
+      )
+    ),
+    fill = guide_legend(
+      override.aes = list(
+        colour = NA
+      )
+    )
+  ) +
+  
+  theme_void() +
+  
+  ggtitle(
+    "Community Structure of Correlation Network"
+  )
+
+# ============================================================
+# Export individual community networks
+# ============================================================
+
+dir.create(
+  "community_networks",
+  showWarnings = FALSE
+)
+
+for (comm in levels(V(net)$community)) {
+  
+  community_nodes <- V(net)[
+    community == comm
+  ]
+  
+  # Skip very small communities
+  if (length(community_nodes) < 5) {
+    next
+  }
+  
+  community_graph <- induced_subgraph(
+    net,
+    community_nodes
+  )
+  
+  pdf(
+    paste0(
+      "community_networks/community_",
+      comm,
+      ".pdf"
+    ),
+    width = 8,
+    height = 8
+  )
+  
+  set.seed(123)
+  
+  plot(
+    community_graph,
+    layout = layout_with_fr(
+      community_graph
+    ),
+    edge.color =
+      E(community_graph)$edge_color,
+    edge.width =
+      E(community_graph)$edge_width,
+    vertex.color =
+      V(community_graph)$final_color,
+    vertex.size =
+      V(community_graph)$size,
+    vertex.label =
+      V(community_graph)$name,
+    vertex.label.cex = 0.8,
+    vertex.frame.color = NA,
+    main = paste(
+      "Community",
+      comm
+    )
+  )
+  
+  dev.off()
+}

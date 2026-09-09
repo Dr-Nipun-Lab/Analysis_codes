@@ -1,0 +1,317 @@
+# ============================================================
+# LINEAR DISCRIMINANT ANALYSIS (LDA)
+# ============================================================
+
+import pandas as pd
+import numpy as np
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+import matplotlib.pyplot as plt
+
+
+# ============================================================
+# DATA STRUCTURE
+# ============================================================
+#
+# The analysis requires multiple datasets representing
+# different groups.
+#
+# Each dataset should contain:
+#
+#   - Rows = samples/observations
+#   - Columns = numerical features/variables
+#   - Index = unique sample/observation identifiers
+#
+# All datasets should contain the same feature columns.
+#
+# A group label is assigned to each dataset before combining.
+#
+# ============================================================
+# USER INPUTS
+# ============================================================
+
+# Replace with the paths to the input datasets.
+data1 = pd.read_csv("data1.csv", index_col=0)
+data2 = pd.read_csv("data2.csv", index_col=0)
+data3 = pd.read_csv("data3.csv", index_col=0)
+
+# Assign group labels to the datasets.
+data1["group"] = "Group_1"
+data2["group"] = "Group_2"
+data3["group"] = "Group_3"
+
+
+# ============================================================
+# CHECK FEATURE CONSISTENCY
+# ============================================================
+
+feature_sets = [
+    set(data1.columns),
+    set(data2.columns),
+    set(data3.columns)
+]
+
+feature_columns = sorted(
+    set.intersection(*feature_sets)
+)
+
+if len(feature_columns) == 0:
+    raise ValueError(
+        "No common feature columns were found across the datasets."
+    )
+
+# Remove the group column from the feature list.
+feature_columns = [
+    column for column in feature_columns
+    if column != "group"
+]
+
+# Ensure all datasets contain the same features
+# in the same order.
+data1 = data1[feature_columns + ["group"]]
+data2 = data2[feature_columns + ["group"]]
+data3 = data3[feature_columns + ["group"]]
+
+
+# ============================================================
+# COMBINE DATASETS
+# ============================================================
+
+combined = pd.concat(
+    [data1, data2, data3],
+    axis=0
+)
+
+
+# ============================================================
+# PREPARE FEATURES AND GROUP LABELS
+# ============================================================
+
+X = combined[feature_columns]
+y = combined["group"]
+
+# Check that all features are numerical.
+if not all(
+    pd.api.types.is_numeric_dtype(X[column])
+    for column in feature_columns
+):
+    raise ValueError(
+        "All feature columns must contain numerical values."
+    )
+
+
+# ============================================================
+# STANDARDIZE FEATURES
+# ============================================================
+
+# Standardization is performed across all samples.
+X_scaled = (
+    X - X.mean()
+) / X.std()
+
+
+# ============================================================
+# FIT LDA MODEL
+# ============================================================
+
+lda = LinearDiscriminantAnalysis()
+
+lda.fit(
+    X_scaled,
+    y
+)
+
+
+# ============================================================
+# SAMPLE-LEVEL LDA SCORES
+# ============================================================
+
+# Transform each sample into the LDA discriminant space.
+# These are the actual sample-level discriminant scores.
+lda_scores = lda.transform(X_scaled)
+
+lda_score_columns = [
+    f"LD{i + 1}"
+    for i in range(lda_scores.shape[1])
+]
+
+lda_sample_scores = pd.DataFrame(
+    lda_scores,
+    index=X.index,
+    columns=lda_score_columns
+)
+
+lda_sample_scores["group"] = y.values
+
+# Preserve sample identifiers.
+lda_sample_scores.index.name = "Sample"
+
+print("\nSample-level LDA scores:")
+print(lda_sample_scores)
+
+
+# ============================================================
+# SAVE SAMPLE-LEVEL LDA SCORES
+# ============================================================
+
+lda_sample_scores.to_csv(
+    "lda_sample_scores.csv"
+)
+
+
+# ============================================================
+# LDA FEATURE LOADINGS
+# ============================================================
+
+# Extract the coefficients defining the discriminant
+# directions.
+lda_loadings = pd.DataFrame(
+    lda.scalings_[:, :len(lda_score_columns)],
+    index=feature_columns,
+    columns=lda_score_columns
+)
+
+print("\nLDA feature loadings:")
+print(lda_loadings)
+
+
+# ============================================================
+# GROUP-SPECIFIC LD1 FEATURE SCORES
+# ============================================================
+
+# Calculate group means using the standardized feature matrix.
+# This ensures that group means and overall means are on the
+# same scale.
+
+X_scaled_with_group = X_scaled.copy()
+X_scaled_with_group["group"] = y.values
+
+group_means = (
+    X_scaled_with_group
+    .groupby("group")[feature_columns]
+    .mean()
+)
+
+# Overall mean of each standardized feature.
+overall_means = X_scaled[feature_columns].mean()
+
+# LD1 feature loadings.
+ld1_loadings = lda_loadings["LD1"]
+
+lda_group_feature_scores = []
+
+for group in group_means.index:
+
+    for feature in feature_columns:
+
+        # Difference between the standardized group mean
+        # and the standardized overall mean.
+        mean_diff = (
+            group_means.loc[group, feature]
+            - overall_means[feature]
+        )
+
+        # LD1-based group-specific feature contribution.
+        lda_score = (
+            ld1_loadings[feature] * mean_diff
+        )
+
+        lda_group_feature_scores.append({
+            "group": group,
+            "feature": feature,
+            "lda_score": lda_score
+        })
+
+
+lda_group_feature_scores = pd.DataFrame(
+    lda_group_feature_scores
+)
+
+# Absolute score can be used to rank the magnitude of
+# feature contribution.
+lda_group_feature_scores["absolute_lda_score"] = (
+    lda_group_feature_scores["lda_score"].abs()
+)
+
+print("\nGroup-specific LD1 feature scores:")
+print(lda_group_feature_scores)
+
+
+# ============================================================
+# SAVE GROUP-SPECIFIC LD1 SCORES
+# ============================================================
+
+lda_group_feature_scores.to_csv(
+    "lda_group_feature_scores.csv",
+    index=False
+)
+
+
+# ============================================================
+# SAVE LD1 FEATURE LOADINGS
+# ============================================================
+
+lda_loadings[["LD1"]].to_csv(
+    "lda_ld1_feature_loadings.csv"
+)
+
+
+# ============================================================
+# VISUALIZE SAMPLE-LEVEL LDA SCORES
+# ============================================================
+
+# The first two discriminant axes are shown when available.
+# This visualization uses the actual LDA-transformed
+# sample coordinates and does not modify them.
+
+if len(lda_score_columns) >= 2:
+
+    plt.figure(figsize=(10, 8))
+
+    for group in lda_sample_scores["group"].unique():
+
+        subset = lda_sample_scores[
+            lda_sample_scores["group"] == group
+        ]
+
+        plt.scatter(
+            subset["LD1"],
+            subset["LD2"],
+            label=group,
+            alpha=0.7
+        )
+
+    plt.xlabel("LD1")
+    plt.ylabel("LD2")
+    plt.title("Linear Discriminant Analysis")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+else:
+
+    plt.figure(figsize=(10, 7))
+
+    for group in lda_sample_scores["group"].unique():
+
+        subset = lda_sample_scores[
+            lda_sample_scores["group"] == group
+        ]
+
+        plt.scatter(
+            subset["LD1"],
+            np.zeros(len(subset)),
+            label=group,
+            alpha=0.7
+        )
+
+    plt.xlabel("LD1")
+    plt.yticks([])
+    plt.title("Linear Discriminant Analysis")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+# ============================================================
+# END OF ANALYSIS
+# ============================================================

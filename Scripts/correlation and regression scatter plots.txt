@@ -1,0 +1,508 @@
+# ============================================================
+# CORRELATION ANALYSIS, HEATMAP, AND SCATTER PLOTS
+# ============================================================
+#
+# DATA STRUCTURE
+# ------------------------------------------------------------
+#
+# Two CSV datasets are required.
+#
+# Dataset 1:
+#   - First column = common sample/observation identifier
+#   - Remaining columns = numerical variables
+#
+# Dataset 2:
+#   - First column = common sample/observation identifier
+#   - Remaining columns = numerical variables
+#
+# The two datasets are merged using the common identifier.
+#
+# ============================================================
+
+
+# ============================================================
+# 1. REQUIRED PACKAGES
+# ============================================================
+
+library(tidyverse)
+library(pheatmap)
+library(Hmisc)
+library(gridExtra)
+
+
+# ============================================================
+# 2. USER INPUTS
+# ============================================================
+
+# Replace with the paths to the two datasets.
+data1 <- read.csv(
+  "data1.csv",
+  check.names = FALSE
+)
+
+data2 <- read.csv(
+  "data2.csv",
+  check.names = FALSE
+)
+
+# Name of the common identifier column.
+id_column <- "ID"
+
+# Significance threshold for identifying significant
+# correlation pairs.
+p_threshold <- 0.05
+
+
+# ============================================================
+# 3. CHECK INPUT DATA
+# ============================================================
+
+if (!(id_column %in% colnames(data1))) {
+  stop(
+    paste0(
+      "Identifier column '",
+      id_column,
+      "' was not found in the first dataset."
+    )
+  )
+}
+
+if (!(id_column %in% colnames(data2))) {
+  stop(
+    paste0(
+      "Identifier column '",
+      id_column,
+      "' was not found in the second dataset."
+    )
+  )
+}
+
+
+# ============================================================
+# 4. MERGE DATASETS
+# ============================================================
+
+data <- inner_join(
+  data1,
+  data2,
+  by = id_column
+)
+
+if (nrow(data) == 0) {
+  stop(
+    "No matching observations were found between the two datasets."
+  )
+}
+
+
+# ============================================================
+# 5. IDENTIFY VARIABLES
+# ============================================================
+
+variables1 <- colnames(data1)[
+  colnames(data1) != id_column
+]
+
+variables2 <- colnames(data2)[
+  colnames(data2) != id_column
+]
+
+# Retain only variables that are present after merging.
+variables1 <- variables1[
+  variables1 %in% colnames(data)
+]
+
+variables2 <- variables2[
+  variables2 %in% colnames(data)
+]
+
+
+# ============================================================
+# 6. EXTRACT NUMERICAL DATA
+# ============================================================
+
+data1_values <- data[, variables1, drop = FALSE]
+data2_values <- data[, variables2, drop = FALSE]
+
+# Convert variables to numeric.
+data1_values <- data.frame(
+  lapply(
+    data1_values,
+    function(x) as.numeric(as.character(x))
+  ),
+  check.names = FALSE
+)
+
+data2_values <- data.frame(
+  lapply(
+    data2_values,
+    function(x) as.numeric(as.character(x))
+  ),
+  check.names = FALSE
+)
+
+
+# ============================================================
+# 7. NORMALITY TEST
+# ============================================================
+#
+# Shapiro-Wilk tests are performed for variables in Dataset 2.
+#
+# Variables with P < 0.05 are classified as non-normal and
+# subjected to inverse normal transformation.
+#
+# ============================================================
+
+shapiro_before <- sapply(
+  data2_values,
+  function(x) {
+
+    x <- x[is.finite(x)]
+
+    # Shapiro-Wilk requires at least 3 observations.
+    if (length(x) < 3) {
+      return(NA_real_)
+    }
+
+    # Avoid failure when all observations are identical.
+    if (length(unique(x)) < 3) {
+      return(NA_real_)
+    }
+
+    shapiro.test(x)$p.value
+  }
+)
+
+print("Shapiro-Wilk P values before transformation:")
+print(shapiro_before)
+
+non_normal_variables <- names(
+  shapiro_before[
+    !is.na(shapiro_before) &
+      shapiro_before < 0.05
+  ]
+)
+
+print("Variables requiring inverse normal transformation:")
+print(non_normal_variables)
+
+
+# ============================================================
+# 8. INVERSE NORMAL TRANSFORMATION
+# ============================================================
+
+invnorm <- function(x) {
+
+  n <- sum(!is.na(x))
+
+  if (n < 2) {
+    return(x)
+  }
+
+  transformed <- rep(
+    NA_real_,
+    length(x)
+  )
+
+  transformed[
+    !is.na(x)
+  ] <- qnorm(
+    (
+      rank(
+        x,
+        na.last = "keep"
+      ) - 0.5
+    ) / n
+  )
+
+  transformed
+}
+
+
+data2_values[
+  non_normal_variables
+] <- lapply(
+  data2_values[
+    non_normal_variables
+  ],
+  invnorm
+)
+
+
+# ============================================================
+# 9. NORMALITY TEST AFTER TRANSFORMATION
+# ============================================================
+
+shapiro_after <- sapply(
+  data2_values,
+  function(x) {
+
+    x <- x[is.finite(x)]
+
+    if (length(x) < 3) {
+      return(NA_real_)
+    }
+
+    if (length(unique(x)) < 3) {
+      return(NA_real_)
+    }
+
+    shapiro.test(x)$p.value
+  }
+)
+
+print("Shapiro-Wilk P values after transformation:")
+print(shapiro_after)
+
+
+# ============================================================
+# 10. CORRELATION ANALYSIS
+# ============================================================
+
+cor_res <- rcorr(
+  as.matrix(
+    cbind(
+      data1_values,
+      data2_values
+    )
+  ),
+  type = "pearson"
+)
+
+# Extract cross-dataset correlations.
+cor_matrix <- cor_res$r[
+  variables1,
+  variables2,
+  drop = FALSE
+]
+
+# Extract corresponding P values.
+p_matrix <- cor_res$P[
+  variables1,
+  variables2,
+  drop = FALSE
+]
+
+
+# ============================================================
+# 11. SAVE CORRELATION RESULTS
+# ============================================================
+
+write.csv(
+  cor_matrix,
+  "correlation_matrix.csv",
+  row.names = TRUE
+)
+
+write.csv(
+  p_matrix,
+  "correlation_pvalues.csv",
+  row.names = TRUE
+)
+
+
+# ============================================================
+# 12. SIGNIFICANCE LABELS
+# ============================================================
+
+sig <- matrix(
+  "",
+  nrow = nrow(p_matrix),
+  ncol = ncol(p_matrix)
+)
+
+sig[p_matrix < 0.05] <- "*"
+sig[p_matrix < 0.01] <- "**"
+sig[p_matrix < 0.001] <- "***"
+
+
+# ============================================================
+# 13. HEATMAP LABELS
+# ============================================================
+
+labels <- matrix(
+  paste0(
+    sprintf(
+      "%.2f",
+      cor_matrix
+    ),
+    sig
+  ),
+  nrow = nrow(cor_matrix),
+  ncol = ncol(cor_matrix)
+)
+
+rownames(labels) <- rownames(cor_matrix)
+colnames(labels) <- colnames(cor_matrix)
+
+
+# ============================================================
+# 14. CORRELATION HEATMAP
+# ============================================================
+
+pheatmap(
+  cor_matrix,
+  color = colorRampPalette(
+    c(
+      "skyblue",
+      "white",
+      "red"
+    )
+  )(100),
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  display_numbers = labels,
+  fontsize_number = 10,
+  main = "Correlation Heatmap"
+)
+
+
+# ============================================================
+# 15. IDENTIFY SIGNIFICANT CORRELATION PAIRS
+# ============================================================
+
+sig_pairs <- which(
+  p_matrix < p_threshold,
+  arr.ind = TRUE
+)
+
+if (nrow(sig_pairs) == 0) {
+
+  message(
+    "No correlation pairs met the specified P-value threshold."
+  )
+
+  pairs_to_plot <- data.frame(
+    variable1 = character(0),
+    variable2 = character(0)
+  )
+
+} else {
+
+  pairs_to_plot <- data.frame(
+    variable1 = rownames(cor_matrix)[
+      sig_pairs[, 1]
+    ],
+    variable2 = colnames(cor_matrix)[
+      sig_pairs[, 2]
+    ]
+  )
+}
+
+
+# ============================================================
+# 16. SCATTER PLOT FUNCTION
+# ============================================================
+
+make_plot <- function(
+    variable1,
+    variable2
+) {
+
+  plot_data <- data.frame(
+    x = data1_values[[variable1]],
+    y = data2_values[[variable2]]
+  )
+
+  # Remove missing or non-finite observations.
+  plot_data <- plot_data[
+    is.finite(plot_data$x) &
+      is.finite(plot_data$y),
+    ,
+    drop = FALSE
+  ]
+
+  # Linear regression.
+  model <- lm(
+    y ~ x,
+    data = plot_data
+  )
+
+  beta <- coef(model)[2]
+
+  pval <- summary(
+    model
+  )$coefficients[2, 4]
+
+  label <- paste0(
+    "β = ",
+    round(beta, 3),
+    "\np = ",
+    signif(pval, 3)
+  )
+
+  ggplot(
+    plot_data,
+    aes(
+      x = x,
+      y = y
+    )
+  ) +
+
+    geom_point(
+      size = 3,
+      alpha = 0.8
+    ) +
+
+    geom_smooth(
+      method = "lm",
+      se = TRUE,
+      alpha = 0.5
+    ) +
+
+    annotate(
+      "text",
+      x = Inf,
+      y = Inf,
+      label = label,
+      hjust = 1.1,
+      vjust = 1.2,
+      size = 3.5
+    ) +
+
+    labs(
+      x = variable1,
+      y = variable2,
+      title = paste(
+        variable1,
+        "vs",
+        variable2
+      )
+    ) +
+
+    theme_bw()
+}
+
+
+# ============================================================
+# 17. GENERATE SCATTER PLOTS
+# ============================================================
+
+if (nrow(pairs_to_plot) > 0) {
+
+  plots <- lapply(
+    seq_len(nrow(pairs_to_plot)),
+    function(i) {
+
+      make_plot(
+        pairs_to_plot$variable1[i],
+        pairs_to_plot$variable2[i]
+      )
+    }
+  )
+
+
+  # ==========================================================
+  # 18. DISPLAY SCATTER PLOTS
+  # ==========================================================
+
+  grid.arrange(
+    grobs = plots,
+    ncol = 3
+  )
+}
+
+
+# ============================================================
+# END OF ANALYSIS
+# ============================================================
