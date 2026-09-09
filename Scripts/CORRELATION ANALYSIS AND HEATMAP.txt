@@ -1,0 +1,147 @@
+# ============================================================
+# CORRELATION ANALYSIS AND HEATMAP
+# ============================================================
+
+library(tidyverse)
+library(pheatmap)
+library(Hmisc)
+library(grid)
+
+# ============================================================
+# USER SETTINGS
+# ============================================================
+
+# Correlations are displayed only when the absolute
+# correlation coefficient is >= this threshold.
+cor_display_threshold <- 0.25
+
+# Heatmap font sizes
+fontsize_row <- 15
+fontsize_col <- 15
+fontsize_number <- 14
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+
+# Replace these with the paths to the two datasets to be compared.
+data1 <- read.csv("data1.csv")
+data2 <- read.csv("data2.csv")
+
+# ============================================================
+# MATCH OBSERVATIONS
+# ============================================================
+
+# The first column in each dataset should contain a common
+# observation/sample identifier.
+data <- inner_join(data1, data2, by = colnames(data1)[1])
+
+# Remove the identifier column and retain numerical variables.
+data1_names <- colnames(data1)[-1]
+data2_names <- colnames(data2)[-1]
+
+data1_values <- data[, data1_names]
+data2_values <- data[, data2_names]
+
+# ============================================================
+# CORRELATION ANALYSIS
+# ============================================================
+
+# Calculate Pearson correlation coefficients and P values.
+cor_res <- rcorr(
+  as.matrix(cbind(data1_values, data2_values)),
+  type = "pearson"
+)
+
+# Extract correlations between the two datasets.
+cor_matrix <- cor_res$r[data1_names, data2_names]
+
+# Extract corresponding P values.
+p_matrix <- cor_res$P[data1_names, data2_names]
+
+# ============================================================
+# SAVE CORRELATION RESULTS
+# ============================================================
+
+write.csv(
+  cor_matrix,
+  "correlation_matrix.csv",
+  row.names = TRUE
+)
+
+write.csv(
+  p_matrix,
+  "correlation_pvalues.csv",
+  row.names = TRUE
+)
+
+# ============================================================
+# SIGNIFICANCE LABELS
+# ============================================================
+
+sig <- matrix(
+  "",
+  nrow = nrow(p_matrix),
+  ncol = ncol(p_matrix)
+)
+
+sig[p_matrix < 0.05]  <- "*"
+sig[p_matrix < 0.01]  <- "**"
+sig[p_matrix < 0.001] <- "***"
+
+# ============================================================
+# HEATMAP LABELS
+# ============================================================
+
+labels <- matrix(
+  "",
+  nrow = nrow(cor_matrix),
+  ncol = ncol(cor_matrix)
+)
+
+show <- abs(cor_matrix) >= cor_display_threshold
+
+labels[show] <- paste0(
+  sprintf("%.2f", cor_matrix[show]),
+  "\n",
+  sig[show]
+)
+
+# ============================================================
+# HEATMAP
+# ============================================================
+
+p <- pheatmap(
+  cor_matrix,
+  color = colorRampPalette(
+    c("skyblue", "white", "red")
+  )(100),
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  display_numbers = labels,
+  fontsize_number = fontsize_number,
+  fontsize_row = fontsize_row,
+  fontsize_col = fontsize_col,
+  main = "Correlation Heatmap"
+)
+
+# ============================================================
+# FORMAT HEATMAP TEXT
+# ============================================================
+
+grid.force()
+
+grid.gedit(
+  "col_names",
+  gp = gpar(fontface = "bold")
+)
+
+grid.gedit(
+  "row_names",
+  gp = gpar(fontface = "bold")
+)
+
+grid.gedit(
+  "matrix",
+  gp = gpar(fontface = "bold")
+)
